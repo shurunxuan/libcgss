@@ -102,6 +102,16 @@ void CAcbFile::InitializeCueList() {
         GetFieldValueAsNumber(cueTable, i, "ReferenceType", &cue.referenceType);
         GetFieldValueAsNumber(cueTable, i, "ReferenceIndex", &cue.referenceIndex);
 
+        int length;
+        if (GetFieldValueAsNumber(cueTable, i, "Length", &length))
+        {
+            if (length == 0)
+            {
+                cues.push_back(cue);
+                continue;
+            }
+        }
+
         switch (cue.referenceType) {
             case 2:
                 synthTable->GetFieldOffset(cue.referenceIndex, "ReferenceItems", &refItemOffset);
@@ -219,12 +229,51 @@ void CAcbFile::InitializeTrackList() {
         throw CFormatException("Missing 'Synth' table.");
     }
 
+    auto cueTable = GetTable("CueTable");
+
+    if (cueTable == nullptr) {
+        throw CFormatException("Missing 'Cue' table.");
+    }
+
     const auto trackCount = trackTable->GetRows().size();
+    const auto cueRows = cueTable->GetRows();
+    const auto cueCount = cueRows.size();
+    const auto waveformRows = waveformTable->GetRows();
+    const auto waveformCount = waveformRows.size();
     const auto &synthRows = synthTable->GetRows();
     const auto synthCount = synthRows.size();
 
-    if (trackCount != synthCount) {
-        throw CFormatException("Number of tracks and number of synthesis records do not match.");
+    vector<bool> trackEmptyStatus;
+    trackEmptyStatus.reserve(trackCount);
+    int nonEmptyTracks = 0;
+
+    for (uint32_t i = 0; i < cueCount; ++i)
+    {
+        const auto& cueRow = cueRows[i];
+        UTF_FIELD *refItemField = nullptr;
+
+        for (const auto &field : cueRow.fields)
+        {
+            if (strcmp(field->name, "Length") == 0)
+            {
+                refItemField = field;
+                break;
+            }
+        }
+
+        if (refItemField == nullptr) {
+            throw CFormatException("Missing 'Length' field in row.");
+        }
+
+        int length = refItemField->value.s32;
+
+        trackEmptyStatus.push_back(length == 0);
+        if (length != 0)
+            nonEmptyTracks++;
+    }
+
+    if (nonEmptyTracks != synthCount) {
+        throw CFormatException("Number of non empty tracks and number of synthesis records do not match.");
     }
 
     uint64_t refItemOffset = 0;
@@ -236,14 +285,23 @@ void CAcbFile::InitializeTrackList() {
 
     tracks.reserve(trackCount);
 
+    int fallbackNum = 0;
     for (uint32_t i = 0; i < trackCount; ++i) {
         ACB_TRACK_RECORD track = {0};
 
         track.isWaveformIdentified = FALSE;
         track.trackIndex = i;
-        track.synthIndex = track.trackIndex;
+        track.synthIndex = i - fallbackNum;
 
-        const auto &synthRow = synthRows[i];
+        if (trackEmptyStatus[i])
+        {
+            tracks.push_back(track);
+            fallbackNum++;
+            continue;
+        }
+
+
+        const auto &synthRow = synthRows[i - fallbackNum];
         UTF_FIELD *refItemField = nullptr;
 
         for (const auto &field : synthRow.fields) {
